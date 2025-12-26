@@ -1,0 +1,47 @@
+# serializer version: 1
+# name: TestSnapshotTools.test_batch_mixing_score_snapshot
+  dict({
+    'batch_mixing_score': 0.408,
+  })
+# ---
+# name: TestSnapshotTools.test_embedding_result_structure_snapshot
+  dict({
+    'embedding_dim': 512,
+    'genes_found': list([
+      'TP53',
+      'BRCA1',
+      'MYC',
+    ]),
+    'has_similarity_matrix': True,
+    'model_used': 'scGPT_human',
+    'num_embeddings': 3,
+    'similarity_matrix_shape': list([
+      3,
+      3,
+    ]),
+  })
+# ---
+# name: TestSnapshotTools.test_predict_cell_type_b_cell_snapshot
+  dict({
+    'alternatives': list([
+    ]),
+    'confidence': 0.99,
+    'predicted_type': 'B cell',
+  })
+# ---
+# name: TestSnapshotTools.test_predict_cell_type_monocyte_snapshot
+  dict({
+    'alternatives': list([
+    ]),
+    'confidence': 0.99,
+    'predicted_type': 'Monocyte',
+  })
+# ---
+# name: TestSnapshotTools.test_predict_cell_type_t_cell_snapshot
+  dict({
+    'alternatives': list([
+    ]),
+    'confidence': 0.99,
+    'predicted_type': 'T cell',
+  })
+# ---

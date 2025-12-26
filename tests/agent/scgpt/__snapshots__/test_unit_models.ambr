@@ -1,0 +1,161 @@
+# serializer version: 1
+# name: TestAnnotationSchemas.test_annotation_request_snapshot
+  dict({
+    'batch_size': 64,
+    'expression_data': 'data/sample.h5ad',
+    'reference_dataset': 'cellxgene',
+  })
+# ---
+# name: TestAnnotationSchemas.test_annotation_result_snapshot
+  dict({
+    'annotations': list([
+      dict({
+        'alternative_types': list([
+          tuple(
+            'NK cell',
+            0.05,
+          ),
+        ]),
+        'cell_id': 'cell_001',
+        'confidence': 0.92,
+        'predicted_type': 'T cell',
+      }),
+      dict({
+        'alternative_types': list([
+          tuple(
+            'Plasma cell',
+            0.08,
+          ),
+        ]),
+        'cell_id': 'cell_002',
+        'confidence': 0.87,
+        'predicted_type': 'B cell',
+      }),
+      dict({
+        'alternative_types': list([
+        ]),
+        'cell_id': 'cell_003',
+        'confidence': 0.95,
+        'predicted_type': 'Monocyte',
+      }),
+    ]),
+    'output_path': '/data/annotated.h5ad',
+    'total_cells': 3,
+    'unique_types': list([
+      'B cell',
+      'Monocyte',
+      'T cell',
+    ]),
+  })
+# ---
+# name: TestAnnotationSchemas.test_cell_annotation_snapshot
+  dict({
+    'alternative_types': list([
+      tuple(
+        'NK cell',
+        0.05,
+      ),
+      tuple(
+        'B cell',
+        0.03,
+      ),
+    ]),
+    'cell_id': 'cell_001',
+    'confidence': 0.92,
+    'predicted_type': 'T cell',
+  })
+# ---
+# name: TestBatchIntegrationSchemas.test_integration_request_snapshot
+  dict({
+    'batch_key': 'sample_id',
+    'dataset_paths': list([
+      'batch1.h5ad',
+      'batch2.h5ad',
+      'batch3.h5ad',
+    ]),
+    'n_hvg': 3000,
+    'output_path': '/output/integrated.h5ad',
+  })
+# ---
+# name: TestBatchIntegrationSchemas.test_integration_result_snapshot
+  dict({
+    'batch_mixing_score': 0.85,
+    'integrated_path': '/data/integrated.h5ad',
+    'n_batches': 3,
+    'n_cells': 15000,
+    'silhouette_score': 0.72,
+  })
+# ---
+# name: TestEmbeddingSchemas.test_embedding_request_snapshot
+  dict({
+    'gene_list': list([
+      'TP53',
+      'BRCA1',
+      'MYC',
+      'EGFR',
+    ]),
+    'include_similarity': True,
+    'model_checkpoint': 'scGPT_human',
+  })
+# ---
+# name: TestEmbeddingSchemas.test_embedding_result_with_similarity_snapshot
+  dict({
+    'embedding_dim': 3,
+    'embeddings': list([
+      dict({
+        'embedding': list([
+          0.1,
+          0.2,
+          0.3,
+        ]),
+        'gene': 'TP53',
+      }),
+      dict({
+        'embedding': list([
+          0.4,
+          0.5,
+          0.6,
+        ]),
+        'gene': 'BRCA1',
+      }),
+      dict({
+        'embedding': list([
+          0.7,
+          0.8,
+          0.9,
+        ]),
+        'gene': 'MYC',
+      }),
+    ]),
+    'model_used': 'scGPT_human',
+    'similarity_matrix': list([
+      list([
+        1.0,
+        0.85,
+        0.72,
+      ]),
+      list([
+        0.85,
+        1.0,
+        0.68,
+      ]),
+      list([
+        0.72,
+        0.68,
+        1.0,
+      ]),
+    ]),
+  })
+# ---
+# name: TestEmbeddingSchemas.test_gene_embedding_snapshot
+  dict({
+    'embedding': list([
+      0.1,
+      0.2,
+      0.3,
+      0.4,
+      0.5,
+    ]),
+    'gene': 'TP53',
+  })
+# ---
