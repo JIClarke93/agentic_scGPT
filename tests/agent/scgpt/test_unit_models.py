@@ -6,12 +6,12 @@ from syrupy.assertion import SnapshotAssertion
 
 from src.agent.scgpt.models import (
     AnnotationRequest,
-    AnnotationResult,
+    AnnotationResponse,
     BatchIntegrationRequest,
-    BatchIntegrationResult,
+    BatchIntegrationResponse,
     CellAnnotation,
     EmbeddingRequest,
-    EmbeddingResult,
+    EmbeddingResponse,
     GeneEmbedding,
 )
 
@@ -82,8 +82,8 @@ class TestAnnotationSchemas:
         with pytest.raises(ValidationError):
             CellAnnotation(cell_id="c1", predicted_type="T", confidence=1.1)
 
-    def test_annotation_result(self):
-        result = AnnotationResult(
+    def test_annotation_response(self):
+        result = AnnotationResponse(
             total_cells=100,
             annotations=[
                 CellAnnotation(cell_id="c1", predicted_type="T cell", confidence=0.9)
@@ -116,8 +116,8 @@ class TestAnnotationSchemas:
         assert ann.model_dump() == snapshot
 
     def test_annotation_result_snapshot(self, snapshot: SnapshotAssertion):
-        """Snapshot test for complete AnnotationResult."""
-        result = AnnotationResult(
+        """Snapshot test for complete AnnotationResponse."""
+        result = AnnotationResponse(
             total_cells=3,
             annotations=[
                 CellAnnotation(
@@ -183,7 +183,7 @@ class TestBatchIntegrationSchemas:
             )
 
     def test_integration_result(self):
-        result = BatchIntegrationResult(
+        result = BatchIntegrationResponse(
             integrated_path="/path/to/integrated.h5ad",
             n_cells=10000,
             n_batches=3,
@@ -205,8 +205,8 @@ class TestBatchIntegrationSchemas:
         assert req.model_dump() == snapshot
 
     def test_integration_result_snapshot(self, snapshot: SnapshotAssertion):
-        """Snapshot test for BatchIntegrationResult."""
-        result = BatchIntegrationResult(
+        """Snapshot test for BatchIntegrationResponse."""
+        result = BatchIntegrationResponse(
             integrated_path="/data/integrated.h5ad",
             n_cells=15000,
             n_batches=3,
@@ -238,7 +238,7 @@ class TestEmbeddingSchemas:
         assert len(emb.embedding) == 3
 
     def test_embedding_result(self):
-        result = EmbeddingResult(
+        result = EmbeddingResponse(
             embeddings=[
                 GeneEmbedding(gene="TP53", embedding=[0.1] * 512),
                 GeneEmbedding(gene="BRCA1", embedding=[0.2] * 512),
@@ -251,7 +251,7 @@ class TestEmbeddingSchemas:
         assert result.similarity_matrix is None
 
     def test_embedding_result_with_similarity(self):
-        result = EmbeddingResult(
+        result = EmbeddingResponse(
             embeddings=[
                 GeneEmbedding(gene="TP53", embedding=[0.1] * 512),
             ],
@@ -280,8 +280,8 @@ class TestEmbeddingSchemas:
         assert emb.model_dump() == snapshot
 
     def test_embedding_result_with_similarity_snapshot(self, snapshot: SnapshotAssertion):
-        """Snapshot test for EmbeddingResult with similarity matrix."""
-        result = EmbeddingResult(
+        """Snapshot test for EmbeddingResponse with similarity matrix."""
+        result = EmbeddingResponse(
             embeddings=[
                 GeneEmbedding(gene="TP53", embedding=[0.1, 0.2, 0.3]),
                 GeneEmbedding(gene="BRCA1", embedding=[0.4, 0.5, 0.6]),

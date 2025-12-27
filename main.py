@@ -3,6 +3,8 @@
 import argparse
 import asyncio
 
+from loguru import logger
+
 
 def main():
     parser = argparse.ArgumentParser(
@@ -30,13 +32,13 @@ def main():
     args = parser.parse_args()
 
     if args.command == "server":
-        from src.server import mcp
+        from src.infra.mcp import mcp
 
-        print(f"Starting scGPT MCP server on port {args.port}...")
+        logger.info(f"Starting scGPT MCP server on port {args.port}...")
         mcp.run(transport="streamable-http", port=args.port)
 
     elif args.command == "agent":
-        from src.agent import run_interactive
+        from src.agent.scgpt import run_interactive
 
         asyncio.run(run_interactive())
 

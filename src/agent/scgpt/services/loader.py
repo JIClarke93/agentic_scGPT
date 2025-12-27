@@ -1,29 +1,62 @@
-"""scGPT model loading and management utilities."""
+"""scGPT model loading and management utilities.
+
+This module provides the ScGPTLoader class for loading, caching, and managing
+scGPT model checkpoints and their associated vocabularies.
+
+Example:
+    >>> from src.agent.scgpt.services import get_loader
+    >>> loader = get_loader()
+    >>> model = loader.load_model("scGPT_human")
+    >>> vocab = loader.load_vocab("scGPT_human")
+"""
 
 import json
-import logging
 from pathlib import Path
 from typing import Any
 
 import torch
+from loguru import logger
 
-logger = logging.getLogger(__name__)
+from ..models import ScGPTModelConfig
 
 # Default checkpoint directory (relative to project root)
 CHECKPOINT_DIR = Path(__file__).parent.parent.parent / "checkpoints"
 
 
 class ScGPTLoader:
-    """Manages loading and caching of scGPT models."""
+    """Manages loading and caching of scGPT models.
+
+    This class handles model loading, vocabulary management, and device
+    selection. Models are cached after first load for efficiency.
+
+    Attributes:
+        checkpoint_dir: Directory containing model checkpoints.
+        device: The torch device being used (cuda, mps, or cpu).
+
+    Example:
+        >>> loader = ScGPTLoader()
+        >>> model = loader.load_model("scGPT_human")
+        >>> embeddings, genes = loader.get_gene_embeddings_from_model(["TP53"])
+    """
 
     def __init__(self, checkpoint_dir: Path | None = None):
+        """Initialize the loader.
+
+        Args:
+            checkpoint_dir: Custom directory for model checkpoints.
+                Defaults to the package's checkpoints directory.
+        """
         self.checkpoint_dir = checkpoint_dir or CHECKPOINT_DIR
         self._models: dict[str, Any] = {}
         self._vocabs: dict[str, dict] = {}
         self._device = self._get_device()
 
     def _get_device(self) -> torch.device:
-        """Determine the best available device."""
+        """Determine the best available compute device.
+
+        Returns:
+            torch.device for CUDA, MPS (Apple Silicon), or CPU.
+        """
         if torch.cuda.is_available():
             device = torch.device("cuda")
             logger.info(f"Using CUDA device: {torch.cuda.get_device_name(0)}")
@@ -37,11 +70,25 @@ class ScGPTLoader:
 
     @property
     def device(self) -> torch.device:
-        """Get the current device."""
+        """Get the current compute device.
+
+        Returns:
+            torch.device: The device used for model computations.
+        """
         return self._device
 
     def get_checkpoint_path(self, checkpoint_name: str) -> Path:
-        """Get the path to a checkpoint directory."""
+        """Get the path to a checkpoint directory.
+
+        Args:
+            checkpoint_name: Name of the checkpoint (e.g., "scGPT_human").
+
+        Returns:
+            Path to the checkpoint directory.
+
+        Raises:
+            FileNotFoundError: If the checkpoint directory does not exist.
+        """
         checkpoint_path = self.checkpoint_dir / checkpoint_name
         if not checkpoint_path.exists():
             raise FileNotFoundError(
@@ -51,7 +98,19 @@ class ScGPTLoader:
         return checkpoint_path
 
     def load_vocab(self, checkpoint_name: str) -> dict[str, int]:
-        """Load the gene vocabulary for a checkpoint."""
+        """Load the gene vocabulary for a checkpoint.
+
+        Vocabularies are cached after first load for efficiency.
+
+        Args:
+            checkpoint_name: Name of the checkpoint (e.g., "scGPT_human").
+
+        Returns:
+            Dictionary mapping gene symbols to token indices.
+
+        Raises:
+            FileNotFoundError: If the checkpoint or vocabulary file is not found.
+        """
         if checkpoint_name in self._vocabs:
             return self._vocabs[checkpoint_name]
 
@@ -69,10 +128,20 @@ class ScGPTLoader:
         return vocab
 
     def load_model(self, checkpoint_name: str) -> Any:
-        """
-        Load a scGPT model from checkpoint.
+        """Load a scGPT model from checkpoint.
 
-        The model is cached after first load for efficiency.
+        The model is cached after first load for efficiency. Subsequent calls
+        with the same checkpoint name return the cached model instance.
+
+        Args:
+            checkpoint_name: Name of the checkpoint (e.g., "scGPT_human").
+
+        Returns:
+            Loaded TransformerModel in evaluation mode on the appropriate device.
+
+        Raises:
+            FileNotFoundError: If the checkpoint or model file is not found.
+            ImportError: If the scGPT package is not properly installed.
         """
         if checkpoint_name in self._models:
             return self._models[checkpoint_name]
@@ -102,35 +171,32 @@ class ScGPTLoader:
         n_tokens = len(vocab)
 
         # Standard scGPT configuration
-        model_config = {
-            "ntoken": n_tokens,
-            "d_model": 512,
-            "nhead": 8,
-            "d_hid": 512,
-            "nlayers": 12,
-            "dropout": 0.2,
-            "pad_token": "<pad>",
-            "vocab": vocab,
-        }
+        model_config = ScGPTModelConfig(ntoken=n_tokens, vocab=vocab)
 
         # Handle different state dict formats
         if "model_state_dict" in state_dict:
             model_state = state_dict["model_state_dict"]
             if "config" in state_dict:
-                model_config.update(state_dict["config"])
+                # Override defaults with saved config
+                model_config = ScGPTModelConfig(
+                    ntoken=n_tokens,
+                    vocab=vocab,
+                    **{k: v for k, v in state_dict["config"].items() if k not in ("ntoken", "vocab")},
+                )
         else:
             model_state = state_dict
 
-        # Initialize model
+        # Initialize model using config
+        config_dict = model_config.model_dump()
         model = TransformerModel(
-            ntoken=model_config["ntoken"],
-            d_model=model_config["d_model"],
-            nhead=model_config["nhead"],
-            d_hid=model_config["d_hid"],
-            nlayers=model_config["nlayers"],
-            dropout=model_config["dropout"],
-            pad_token=model_config["pad_token"],
-            vocab=model_config["vocab"],
+            ntoken=config_dict["ntoken"],
+            d_model=config_dict["d_model"],
+            nhead=config_dict["nhead"],
+            d_hid=config_dict["d_hid"],
+            nlayers=config_dict["nlayers"],
+            dropout=config_dict["dropout"],
+            pad_token=config_dict["pad_token"],
+            vocab=config_dict["vocab"],
         )
 
         # Load weights
@@ -187,14 +253,23 @@ class ScGPTLoader:
         return embeddings, found_genes
 
     def unload_model(self, checkpoint_name: str) -> None:
-        """Unload a model to free memory."""
+        """Unload a model to free memory.
+
+        Removes the model from the cache and clears CUDA memory if applicable.
+
+        Args:
+            checkpoint_name: Name of the checkpoint to unload.
+        """
         if checkpoint_name in self._models:
             del self._models[checkpoint_name]
             torch.cuda.empty_cache()
             logger.info(f"Unloaded model {checkpoint_name}")
 
     def unload_all(self) -> None:
-        """Unload all models."""
+        """Unload all cached models to free memory.
+
+        Clears all models from the cache and releases CUDA memory.
+        """
         self._models.clear()
         torch.cuda.empty_cache()
         logger.info("Unloaded all models")
@@ -205,7 +280,14 @@ _loader: ScGPTLoader | None = None
 
 
 def get_loader() -> ScGPTLoader:
-    """Get the global scGPT loader instance."""
+    """Get the global scGPT loader instance.
+
+    Returns a singleton ScGPTLoader instance, creating it if necessary.
+    This ensures models and vocabularies are cached globally.
+
+    Returns:
+        The global ScGPTLoader singleton instance.
+    """
     global _loader
     if _loader is None:
         _loader = ScGPTLoader()

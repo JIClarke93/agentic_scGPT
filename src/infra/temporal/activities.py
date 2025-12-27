@@ -5,6 +5,8 @@ from datetime import timedelta
 from temporalio import activity, workflow
 from temporalio.common import RetryPolicy
 
+from src.agent.scgpt.constants import COMMON_MARKERS, DEFAULT_BATCH_SIZE, DEFAULT_N_HVG
+from src.agent.scgpt.models import AnnotationRequest, BatchIntegrationRequest, EmbeddingRequest
 from src.agent.scgpt.tools import annotate_cell_types, get_gene_embeddings, integrate_batches
 
 
@@ -39,7 +41,7 @@ GPU_RETRY_POLICY = RetryPolicy(
 async def annotate_cells_activity(
     expression_data: str,
     reference_dataset: str = "cellxgene",
-    batch_size: int = 64,
+    batch_size: int = DEFAULT_BATCH_SIZE,
 ) -> dict:
     """
     Temporal activity for cell type annotation with automatic retry.
@@ -59,11 +61,12 @@ async def annotate_cells_activity(
     activity.logger.info(f"Starting cell annotation for {expression_data}")
 
     try:
-        result = await annotate_cell_types(
+        request = AnnotationRequest(
             expression_data=expression_data,
             reference_dataset=reference_dataset,
             batch_size=batch_size,
         )
+        result = await annotate_cell_types(request)
         activity.logger.info(f"Annotated {result.total_cells} cells")
         return result.model_dump()
 
@@ -83,7 +86,7 @@ async def annotate_cells_activity(
 async def integrate_batches_activity(
     dataset_paths: list[str],
     batch_key: str = "batch",
-    n_hvg: int = 2000,
+    n_hvg: int = DEFAULT_N_HVG,
     output_path: str | None = None,
 ) -> dict:
     """
@@ -101,12 +104,13 @@ async def integrate_batches_activity(
     activity.logger.info(f"Starting batch integration of {len(dataset_paths)} datasets")
 
     try:
-        result = await integrate_batches(
+        request = BatchIntegrationRequest(
             dataset_paths=dataset_paths,
             batch_key=batch_key,
             n_hvg=n_hvg,
             output_path=output_path,
         )
+        result = await integrate_batches(request)
         activity.logger.info(f"Integration complete: {result.n_cells} cells")
         return result.model_dump()
 
@@ -137,11 +141,12 @@ async def embed_genes_activity(
     activity.logger.info(f"Extracting embeddings for {len(gene_list)} genes")
 
     try:
-        result = await get_gene_embeddings(
+        request = EmbeddingRequest(
             gene_list=gene_list,
             model_checkpoint=model_checkpoint,
             include_similarity=include_similarity,
         )
+        result = await get_gene_embeddings(request)
         activity.logger.info(f"Extracted {len(result.embeddings)} embeddings")
         return result.model_dump()
 
@@ -179,18 +184,15 @@ class ScGPTAnalysisWorkflow:
         # Step 1: Annotate cell types
         annotation_result = await workflow.execute_activity(
             annotate_cells_activity,
-            args=[expression_data, reference_dataset, 64],
+            args=[expression_data, reference_dataset, DEFAULT_BATCH_SIZE],
             start_to_close_timeout=timedelta(minutes=10),
             retry_policy=GPU_RETRY_POLICY,
         )
 
         # Step 2: Extract embeddings for marker genes
-        # (In real implementation, would extract markers from annotation)
-        marker_genes = ["CD3D", "CD4", "CD8A", "MS4A1", "CD14"]
-
         embedding_result = await workflow.execute_activity(
             embed_genes_activity,
-            args=[marker_genes, "scGPT_human", True],
+            args=[COMMON_MARKERS, "scGPT_human", True],
             start_to_close_timeout=timedelta(minutes=5),
             retry_policy=GPU_RETRY_POLICY,
         )

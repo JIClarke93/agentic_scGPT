@@ -1,32 +1,66 @@
-"""Batch integration tool using scGPT."""
+"""Batch integration tool using scGPT.
 
-import logging
+This module provides functionality to integrate multiple scRNA-seq datasets
+with batch correction using scGPT embeddings, enabling joint analysis of
+datasets from different experiments or studies.
+
+Example:
+    >>> from src.agent.scgpt.tools.integrate import integrate_batches
+    >>> from src.agent.scgpt.models import BatchIntegrationRequest
+    >>> request = BatchIntegrationRequest(
+    ...     dataset_paths=["batch1.h5ad", "batch2.h5ad"]
+    ... )
+    >>> result = await integrate_batches(request)
+    >>> print(f"Integrated {result.n_cells} cells from {result.n_batches} batches")
+"""
+
 from pathlib import Path
 
 import numpy as np
 import scanpy as sc
 import torch
+from loguru import logger
 from scipy.sparse import issparse
 from sklearn.metrics import silhouette_score
 from sklearn.neighbors import NearestNeighbors
 
-from ..models import BatchIntegrationResult
+from ..models import BatchIntegrationRequest, BatchIntegrationResponse
 from ..services import get_loader
+from ..constants import (
+    DEFAULT_N_NEIGHBORS,
+    INTEGRATION_BATCH_SIZE,
+    LOG_PROGRESS_INTERVAL,
+    MAX_SILHOUETTE_SAMPLE_SIZE,
+    MIN_CELLS_PER_GENE,
+    MIN_GENES_PER_CELL,
+    MIN_VALID_GENES_WARNING,
+    NORMALIZATION_TARGET_SUM,
+)
 
-logger = logging.getLogger(__name__)
 
 
 def _preprocess_for_integration(
     adata: sc.AnnData,
     n_hvg: int = 2000,
 ) -> sc.AnnData:
-    """Preprocess AnnData for integration."""
+    """Preprocess AnnData for integration.
+
+    Applies standard preprocessing without subsetting to HVGs, which is done
+    later to preserve gene overlap between datasets.
+
+    Args:
+        adata: AnnData object containing raw expression data.
+        n_hvg: Number of highly variable genes to identify.
+
+    Returns:
+        Preprocessed AnnData with HVG annotations but not subsetted.
+    """
     adata = adata.copy()
 
-    sc.pp.filter_cells(adata, min_genes=200)
-    sc.pp.filter_genes(adata, min_cells=3)
+    sc.pp.filter_cells(adata, min_genes=MIN_GENES_PER_CELL)
+    sc.pp.filter_genes(adata, min_cells=MIN_CELLS_PER_GENE)
 
-    sc.pp.normalize_total(adata, target_sum=1e4)
+    sc.pp.normalize_total(adata, target_sum=NORMALIZATION_TARGET_SUM)
     sc.pp.log1p(adata)
 
     sc.pp.highly_variable_genes(adata, n_top_genes=n_hvg, subset=False)
@@ -37,12 +71,20 @@ def _preprocess_for_integration(
 def _compute_batch_mixing_score(
     embeddings: np.ndarray,
     batch_labels: np.ndarray,
-    n_neighbors: int = 50,
+    n_neighbors: int = DEFAULT_N_NEIGHBORS,
 ) -> float:
-    """
-    Compute batch mixing score using k-NN approach.
+    """Compute batch mixing score using k-NN approach.
 
-    Higher score indicates better mixing (0-1 scale).
+    Measures how well different batches are mixed in the embedding space
+    by examining the batch composition of each cell's neighborhood.
+
+    Args:
+        embeddings: Cell embeddings array of shape (n_cells, embedding_dim).
+        batch_labels: Array of batch labels for each cell.
+        n_neighbors: Number of neighbors to consider.
+
+    Returns:
+        Batch mixing score between 0.0 (no mixing) and 1.0 (perfect mixing).
     """
     if len(np.unique(batch_labels)) < 2:
         return 1.0
@@ -61,57 +103,62 @@ def _compute_batch_mixing_score(
 
 
 def _get_expression_matrix(adata: sc.AnnData) -> np.ndarray:
-    """Extract expression matrix as dense numpy array."""
+    """Extract expression matrix as dense numpy array.
+
+    Args:
+        adata: AnnData object containing expression data.
+
+    Returns:
+        Dense numpy array of shape (n_cells, n_genes).
+    """
     X = adata.X
+    if X is None:
+        raise ValueError("AnnData object has no expression matrix (X is None)")
     if issparse(X):
-        X = X.toarray()
+        X = X.toarray()  # type: ignore[union-attr]
     return np.array(X)
 
 
-async def integrate_batches(
-    dataset_paths: list[str],
-    batch_key: str = "batch",
-    n_hvg: int = 2000,
-    output_path: str | None = None,
-) -> BatchIntegrationResult:
-    """
-    Integrate multiple scRNA-seq datasets with batch correction using scGPT.
+async def integrate_batches(request: BatchIntegrationRequest) -> BatchIntegrationResponse:
+    """Integrate multiple scRNA-seq datasets with batch correction using scGPT.
 
-    This tool uses scGPT embeddings to create a shared representation space
-    where batch effects are minimized while biological variation is preserved.
+    Uses scGPT embeddings to create a shared representation space where
+    batch effects are minimized while biological variation is preserved.
 
     Args:
-        dataset_paths: List of paths to h5ad files to integrate
-        batch_key: Key in adata.obs identifying batch
-        n_hvg: Number of highly variable genes to use
-        output_path: Optional path to save integrated dataset
+        request: BatchIntegrationRequest containing dataset paths, batch key,
+            number of highly variable genes, and optional output path.
 
     Returns:
-        BatchIntegrationResult with integration metrics
+        BatchIntegrationResponse with integration metrics and output path.
+
+    Raises:
+        FileNotFoundError: If any dataset file or model checkpoint is not found.
+        ValueError: If fewer than 2 datasets are provided.
     """
-    for path in dataset_paths:
+    for path in request.dataset_paths:
         if not Path(path).exists():
             raise FileNotFoundError(f"Dataset not found: {path}")
 
-    if len(dataset_paths) < 2:
+    if len(request.dataset_paths) < 2:
         raise ValueError("At least 2 datasets required for integration")
 
-    logger.info(f"Integrating {len(dataset_paths)} datasets")
+    logger.info(f"Integrating {len(request.dataset_paths)} datasets")
 
     adatas = []
-    for i, path in enumerate(dataset_paths):
+    for i, path in enumerate(request.dataset_paths):
         logger.info(f"Loading dataset {i+1}: {path}")
         adata = sc.read_h5ad(path)
-        adata.obs[batch_key] = f"batch_{i}"
+        adata.obs[request.batch_key] = f"batch_{i}"
         adatas.append(adata)
         logger.info(f"  - {adata.n_obs} cells x {adata.n_vars} genes")
 
     logger.info("Concatenating datasets...")
-    adata_combined = sc.concat(adatas, label=batch_key, keys=[f"batch_{i}" for i in range(len(adatas))])
+    adata_combined = sc.concat(adatas, label=request.batch_key, keys=[f"batch_{i}" for i in range(len(adatas))])
     logger.info(f"Combined: {adata_combined.n_obs} cells x {adata_combined.n_vars} genes")
 
-    logger.info(f"Preprocessing with {n_hvg} highly variable genes...")
-    adata_processed = _preprocess_for_integration(adata_combined, n_hvg=n_hvg)
+    logger.info(f"Preprocessing with {request.n_hvg} highly variable genes...")
+    adata_processed = _preprocess_for_integration(adata_combined, n_hvg=request.n_hvg)
 
     loader = get_loader()
 
@@ -123,7 +170,7 @@ async def integrate_batches(
         valid_genes = [g for g in gene_names if g in vocab]
         logger.info(f"Found {len(valid_genes)}/{len(gene_names)} HVGs in scGPT vocabulary")
 
-        if len(valid_genes) < 100:
+        if len(valid_genes) < MIN_VALID_GENES_WARNING:
             logger.warning("Very few genes match vocabulary. Integration may be suboptimal.")
 
         model = loader.load_model("scGPT_human")
@@ -138,7 +185,7 @@ async def integrate_batches(
         expr_matrix = _get_expression_matrix(adata_subset)
 
         logger.info("Computing cell embeddings...")
-        batch_size = 256
+        batch_size = INTEGRATION_BATCH_SIZE
         n_cells = expr_matrix.shape[0]
         cell_embeddings = []
 
@@ -154,7 +201,7 @@ async def integrate_batches(
 
             cell_embeddings.append(cell_embeds.cpu().numpy())
 
-            if batch_end % 1000 == 0 or batch_end == n_cells:
+            if batch_end % LOG_PROGRESS_INTERVAL == 0 or batch_end == n_cells:
                 logger.info(f"  Processed {batch_end}/{n_cells} cells")
 
         all_embeddings = np.vstack(cell_embeddings)
@@ -162,7 +209,7 @@ async def integrate_batches(
 
         adata_combined.obsm["X_scgpt"] = all_embeddings
 
-        batch_labels = adata_combined.obs[batch_key].values
+        batch_labels = np.array(adata_combined.obs[request.batch_key])
         batch_codes = np.array([int(b.split("_")[1]) for b in batch_labels])
 
         logger.info("Computing batch mixing score...")
@@ -170,7 +217,7 @@ async def integrate_batches(
 
         logger.info("Computing silhouette score...")
         if len(np.unique(batch_codes)) > 1:
-            n_sample = min(5000, len(all_embeddings))
+            n_sample = min(MAX_SILHOUETTE_SAMPLE_SIZE, len(all_embeddings))
             sample_idx = np.random.choice(len(all_embeddings), n_sample, replace=False)
             sil_score = silhouette_score(all_embeddings[sample_idx], batch_codes[sample_idx])
             integration_sil = float(1 - (sil_score + 1) / 2)
@@ -181,16 +228,17 @@ async def integrate_batches(
         sc.pp.neighbors(adata_combined, use_rep="X_scgpt")
         sc.tl.umap(adata_combined)
 
+        output_path = request.output_path
         if output_path is None:
-            output_path = str(Path(dataset_paths[0]).parent / "integrated.h5ad")
+            output_path = str(Path(request.dataset_paths[0]).parent / "integrated.h5ad")
 
         logger.info(f"Saving integrated dataset to {output_path}")
         adata_combined.write_h5ad(output_path)
 
-        return BatchIntegrationResult(
+        return BatchIntegrationResponse(
             integrated_path=output_path,
             n_cells=adata_combined.n_obs,
-            n_batches=len(dataset_paths),
+            n_batches=len(request.dataset_paths),
             batch_mixing_score=round(batch_mixing, 4),
             silhouette_score=round(integration_sil, 4),
         )

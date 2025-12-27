@@ -11,7 +11,29 @@ import scipy.sparse as sp
 import torch
 from syrupy.assertion import SnapshotAssertion
 
-from src.agent.scgpt.models import AnnotationResult, BatchIntegrationResult, EmbeddingResult
+from src.agent.scgpt.models import (
+    AnnotationRequest,
+    AnnotationResponse,
+    BatchIntegrationRequest,
+    BatchIntegrationResponse,
+    CellTypePredictionRequest,
+    EmbeddingRequest,
+    EmbeddingResponse,
+)
+from .conftest import (
+    TEST_BATCH_SIZE,
+    TEST_EMBEDDING_DIM,
+    TEST_EMBEDDING_GENES,
+    TEST_MARKER_GENES,
+    TEST_N_CELLS,
+    TEST_N_GENES,
+    TEST_N_HVG,
+    TEST_N_NEIGHBORS,
+    TEST_N_SAMPLES,
+    TEST_POISSON_LAMBDA,
+    TEST_RANDOM_SEED,
+    TEST_STANDARD_GENES,
+)
 
 
 @pytest.fixture
@@ -20,27 +42,17 @@ def mock_loader():
     mock = MagicMock()
     mock.device = "cpu"
 
-    # Mock vocabulary
-    mock.load_vocab.return_value = {
-        "TP53": 0,
-        "BRCA1": 1,
-        "MYC": 2,
-        "CD3D": 3,
-        "CD3E": 4,
-        "CD19": 5,
-        "MS4A1": 6,
-        "CD14": 7,
-        "LYZ": 8,
-        "NKG7": 9,
-    }
+    # Mock vocabulary - combine embedding genes and markers
+    vocab = {gene: idx for idx, gene in enumerate(TEST_EMBEDDING_GENES + TEST_MARKER_GENES)}
+    mock.load_vocab.return_value = vocab
 
     # Mock model with encoder
     mock_model = MagicMock()
 
     def mock_encoder(indices):
-        # Return fake embeddings of shape (n_genes, 512)
+        # Return fake embeddings of shape (n_genes, embedding_dim)
         n = len(indices) if hasattr(indices, "__len__") else indices.shape[0]
-        return torch.randn(n, 512)
+        return torch.randn(n, TEST_EMBEDDING_DIM)
 
     mock_model.encoder = mock_encoder
     mock_model.eval.return_value = mock_model
@@ -49,7 +61,7 @@ def mock_loader():
     # Mock get_gene_embeddings_from_model
     def mock_get_embeddings(genes, checkpoint_name):
         found = [g for g in genes if g in mock.load_vocab()]
-        embeddings = torch.randn(len(found), 512)
+        embeddings = torch.randn(len(found), TEST_EMBEDDING_DIM)
         return embeddings, found
 
     mock.get_gene_embeddings_from_model = mock_get_embeddings
@@ -155,9 +167,9 @@ def sample_h5ad_pair(tmp_path):
         n_cells = 100
         n_genes = 500  # More genes to survive filtering
 
-        # Dense enough data to survive preprocessing
-        X = np.random.poisson(2, size=(n_cells, n_genes)).astype(float)
-        X = sp.csr_matrix(X)
+        # Use dense array to avoid SparseEfficiencyWarning during preprocessing
+        # (scanpy modifies matrix structure which is expensive for CSR format)
+        X = np.random.poisson(2, size=(n_cells, n_genes)).astype(np.float32)
 
         gene_names = [f"GENE_{i}" for i in range(n_genes)]
         cell_ids = [f"batch{batch_idx}_cell_{i:04d}" for i in range(n_cells)]
@@ -182,13 +194,14 @@ class TestGetGeneEmbeddings:
         with patch("src.agent.scgpt.tools.embeddings.get_loader", return_value=mock_loader):
             from src.agent.scgpt.tools.embeddings import get_gene_embeddings
 
-            result = await get_gene_embeddings(
+            request = EmbeddingRequest(
                 gene_list=["TP53", "BRCA1", "MYC"],
                 model_checkpoint="scGPT_human",
                 include_similarity=False,
             )
+            result = await get_gene_embeddings(request)
 
-            assert isinstance(result, EmbeddingResult)
+            assert isinstance(result, EmbeddingResponse)
             assert result.model_used == "scGPT_human"
             assert result.embedding_dim == 512
             assert result.similarity_matrix is None
@@ -199,11 +212,12 @@ class TestGetGeneEmbeddings:
         with patch("src.agent.scgpt.tools.embeddings.get_loader", return_value=mock_loader):
             from src.agent.scgpt.tools.embeddings import get_gene_embeddings
 
-            result = await get_gene_embeddings(
+            request = EmbeddingRequest(
                 gene_list=["TP53", "BRCA1"],
                 model_checkpoint="scGPT_human",
                 include_similarity=True,
             )
+            result = await get_gene_embeddings(request)
 
             assert result.similarity_matrix is not None
             assert len(result.similarity_matrix) == len(result.embeddings)
@@ -215,7 +229,9 @@ class TestGetGeneEmbeddings:
             from src.agent.scgpt.tools.embeddings import get_gene_embeddings
 
             with pytest.raises(ValueError, match="cannot be empty"):
-                await get_gene_embeddings(gene_list=[])
+                request = EmbeddingRequest(gene_list=["dummy"])
+                request.gene_list = []  # Bypass validation for testing
+                await get_gene_embeddings(request)
 
 
 class TestAnnotateCellTypes:
@@ -228,9 +244,8 @@ class TestAnnotateCellTypes:
             from src.agent.scgpt.tools.annotate import annotate_cell_types
 
             with pytest.raises(FileNotFoundError):
-                await annotate_cell_types(
-                    expression_data="/nonexistent/path.h5ad"
-                )
+                request = AnnotationRequest(expression_data="/nonexistent/path.h5ad")
+                await annotate_cell_types(request)
 
     @pytest.mark.asyncio
     async def test_annotate_basic(self, mock_loader, sample_h5ad):
@@ -238,12 +253,13 @@ class TestAnnotateCellTypes:
         with patch("src.agent.scgpt.tools.annotate.get_loader", return_value=mock_loader):
             from src.agent.scgpt.tools.annotate import annotate_cell_types
 
-            result = await annotate_cell_types(
+            request = AnnotationRequest(
                 expression_data=sample_h5ad,
                 batch_size=32,
             )
+            result = await annotate_cell_types(request)
 
-            assert isinstance(result, AnnotationResult)
+            assert isinstance(result, AnnotationResponse)
             assert result.total_cells > 0
             assert len(result.annotations) == result.total_cells
             assert len(result.unique_types) > 0
@@ -257,24 +273,16 @@ class TestIntegrateBatches:
     """Tests for batch integration."""
 
     @pytest.mark.asyncio
-    async def test_integrate_single_dataset_error(self, mock_loader, sample_h5ad):
-        """Test that single dataset raises error."""
-        with patch("src.agent.scgpt.tools.integrate.get_loader", return_value=mock_loader):
-            from src.agent.scgpt.tools.integrate import integrate_batches
-
-            with pytest.raises(ValueError, match="At least 2 datasets"):
-                await integrate_batches(dataset_paths=[sample_h5ad])
-
-    @pytest.mark.asyncio
     async def test_integrate_file_not_found(self, mock_loader):
         """Test that missing file raises error."""
         with patch("src.agent.scgpt.tools.integrate.get_loader", return_value=mock_loader):
             from src.agent.scgpt.tools.integrate import integrate_batches
 
             with pytest.raises(FileNotFoundError):
-                await integrate_batches(
+                request = BatchIntegrationRequest(
                     dataset_paths=["/nonexistent/a.h5ad", "/nonexistent/b.h5ad"]
                 )
+                await integrate_batches(request)
 
     @pytest.mark.asyncio
     async def test_integrate_basic(self, mock_loader, sample_h5ad_pair):
@@ -282,12 +290,13 @@ class TestIntegrateBatches:
         with patch("src.agent.scgpt.tools.integrate.get_loader", return_value=mock_loader):
             from src.agent.scgpt.tools.integrate import integrate_batches
 
-            result = await integrate_batches(
+            request = BatchIntegrationRequest(
                 dataset_paths=sample_h5ad_pair,
                 n_hvg=500,
             )
+            result = await integrate_batches(request)
 
-            assert isinstance(result, BatchIntegrationResult)
+            assert isinstance(result, BatchIntegrationResponse)
             assert result.n_batches == 2
             assert result.n_cells > 0
             assert 0 <= result.batch_mixing_score <= 1
@@ -302,31 +311,25 @@ class TestHelperFunctions:
         """Test cell type prediction helper."""
         from src.agent.scgpt.tools.annotate import _predict_cell_type
 
-        # Create mock AnnData with T cell markers
-        import anndata as ad
-        import numpy as np
-
         # Expression data where CD3D, CD3E are highly expressed
-        X = np.zeros((1, 10))
-        X[0, 0] = 5.0  # CD3D
-        X[0, 1] = 4.0  # CD3E
-
-        adata = ad.AnnData(X=X)
-        adata.var.index = [
+        gene_names = [
             "CD3D", "CD3E", "CD19", "MS4A1", "CD14",
             "LYZ", "NKG7", "CD68", "COL1A1", "EPCAM"
         ]
+        expression = [0.0] * 10
+        expression[0] = 5.0  # CD3D
+        expression[1] = 4.0  # CD3E
 
-        cell_type, confidence, alternatives = _predict_cell_type(
-            embedding=np.zeros(512),  # Not used in current implementation
-            adata=adata,
-            cell_idx=0,
-            valid_genes=list(adata.var.index),
+        request = CellTypePredictionRequest(
+            embedding=[0.0] * 512,  # Not used in current implementation
+            expression=expression,
+            gene_names=gene_names,
         )
+        response = _predict_cell_type(request)
 
         # Should predict T cell due to CD3D/CD3E expression
-        assert cell_type == "T cell"
-        assert confidence > 0
+        assert response.predicted_type == "T cell"
+        assert response.confidence > 0
 
     def test_compute_batch_mixing_score(self):
         """Test batch mixing score computation."""
@@ -362,27 +365,25 @@ class TestSnapshotTools:
         from src.agent.scgpt.tools.annotate import _predict_cell_type
 
         # Expression data where CD3D, CD3E are highly expressed (T cell markers)
-        X = np.zeros((1, 10))
-        X[0, 0] = 5.0  # CD3D
-        X[0, 1] = 4.0  # CD3E
-
-        adata = ad.AnnData(X=X)
-        adata.var.index = [
+        gene_names = [
             "CD3D", "CD3E", "CD19", "MS4A1", "CD14",
             "LYZ", "NKG7", "CD68", "COL1A1", "EPCAM"
         ]
+        expression = [0.0] * 10
+        expression[0] = 5.0  # CD3D
+        expression[1] = 4.0  # CD3E
 
-        cell_type, confidence, alternatives = _predict_cell_type(
-            embedding=np.zeros(512),
-            adata=adata,
-            cell_idx=0,
-            valid_genes=list(adata.var.index),
+        request = CellTypePredictionRequest(
+            embedding=[0.0] * 512,
+            expression=expression,
+            gene_names=gene_names,
         )
+        response = _predict_cell_type(request)
 
         result = {
-            "predicted_type": cell_type,
-            "confidence": confidence,
-            "alternatives": alternatives,
+            "predicted_type": response.predicted_type,
+            "confidence": response.confidence,
+            "alternatives": [(alt.cell_type, alt.probability) for alt in response.alternatives],
         }
         assert result == snapshot
 
@@ -391,27 +392,25 @@ class TestSnapshotTools:
         from src.agent.scgpt.tools.annotate import _predict_cell_type
 
         # Expression data where CD19, MS4A1 are highly expressed (B cell markers)
-        X = np.zeros((1, 10))
-        X[0, 2] = 6.0  # CD19
-        X[0, 3] = 5.0  # MS4A1
-
-        adata = ad.AnnData(X=X)
-        adata.var.index = [
+        gene_names = [
             "CD3D", "CD3E", "CD19", "MS4A1", "CD14",
             "LYZ", "NKG7", "CD68", "COL1A1", "EPCAM"
         ]
+        expression = [0.0] * 10
+        expression[2] = 6.0  # CD19
+        expression[3] = 5.0  # MS4A1
 
-        cell_type, confidence, alternatives = _predict_cell_type(
-            embedding=np.zeros(512),
-            adata=adata,
-            cell_idx=0,
-            valid_genes=list(adata.var.index),
+        request = CellTypePredictionRequest(
+            embedding=[0.0] * 512,
+            expression=expression,
+            gene_names=gene_names,
         )
+        response = _predict_cell_type(request)
 
         result = {
-            "predicted_type": cell_type,
-            "confidence": confidence,
-            "alternatives": alternatives,
+            "predicted_type": response.predicted_type,
+            "confidence": response.confidence,
+            "alternatives": [(alt.cell_type, alt.probability) for alt in response.alternatives],
         }
         assert result == snapshot
 
@@ -420,27 +419,25 @@ class TestSnapshotTools:
         from src.agent.scgpt.tools.annotate import _predict_cell_type
 
         # Expression data where CD14, LYZ are highly expressed (Monocyte markers)
-        X = np.zeros((1, 10))
-        X[0, 4] = 7.0  # CD14
-        X[0, 5] = 6.0  # LYZ
-
-        adata = ad.AnnData(X=X)
-        adata.var.index = [
+        gene_names = [
             "CD3D", "CD3E", "CD19", "MS4A1", "CD14",
             "LYZ", "NKG7", "CD68", "COL1A1", "EPCAM"
         ]
+        expression = [0.0] * 10
+        expression[4] = 7.0  # CD14
+        expression[5] = 6.0  # LYZ
 
-        cell_type, confidence, alternatives = _predict_cell_type(
-            embedding=np.zeros(512),
-            adata=adata,
-            cell_idx=0,
-            valid_genes=list(adata.var.index),
+        request = CellTypePredictionRequest(
+            embedding=[0.0] * 512,
+            expression=expression,
+            gene_names=gene_names,
         )
+        response = _predict_cell_type(request)
 
         result = {
-            "predicted_type": cell_type,
-            "confidence": confidence,
-            "alternatives": alternatives,
+            "predicted_type": response.predicted_type,
+            "confidence": response.confidence,
+            "alternatives": [(alt.cell_type, alt.probability) for alt in response.alternatives],
         }
         assert result == snapshot
 
@@ -466,11 +463,12 @@ class TestSnapshotTools:
         with patch("src.agent.scgpt.tools.embeddings.get_loader", return_value=deterministic_mock_loader):
             from src.agent.scgpt.tools.embeddings import get_gene_embeddings
 
-            result = await get_gene_embeddings(
+            request = EmbeddingRequest(
                 gene_list=["TP53", "BRCA1", "MYC"],
                 model_checkpoint="scGPT_human",
                 include_similarity=True,
             )
+            result = await get_gene_embeddings(request)
 
             # Snapshot the structure, not the actual embedding values
             structure = {

@@ -65,12 +65,12 @@ class TestServerImports:
         """Test that models can be imported."""
         from src.agent.scgpt.models import (
             AnnotationRequest,
-            AnnotationResult,
+            AnnotationResponse,
             BatchIntegrationRequest,
-            BatchIntegrationResult,
+            BatchIntegrationResponse,
             CellAnnotation,
             EmbeddingRequest,
-            EmbeddingResult,
+            EmbeddingResponse,
             GeneEmbedding,
         )
 
@@ -78,8 +78,8 @@ class TestServerImports:
         from pydantic import BaseModel
 
         assert issubclass(AnnotationRequest, BaseModel)
-        assert issubclass(AnnotationResult, BaseModel)
+        assert issubclass(AnnotationResponse, BaseModel)
         assert issubclass(BatchIntegrationRequest, BaseModel)
-        assert issubclass(BatchIntegrationResult, BaseModel)
+        assert issubclass(BatchIntegrationResponse, BaseModel)
         assert issubclass(EmbeddingRequest, BaseModel)
-        assert issubclass(EmbeddingResult, BaseModel)
+        assert issubclass(EmbeddingResponse, BaseModel)

@@ -1,6 +1,18 @@
-"""Cell type annotation tool using scGPT."""
+"""Cell type annotation tool using scGPT.
 
-import logging
+This module provides functionality to annotate cell types from single-cell
+RNA-seq data using the scGPT foundation model embeddings and marker gene
+expression patterns.
+
+Example:
+    >>> from src.agent.scgpt.tools.annotate import annotate_cell_types
+    >>> from src.agent.scgpt.models import AnnotationRequest
+    >>> request = AnnotationRequest(expression_data="data/pbmc.h5ad")
+    >>> result = await annotate_cell_types(request)
+    >>> print(f"Found {len(result.unique_types)} cell types")
+"""
+
+from loguru import logger
 from pathlib import Path
 
 import numpy as np
@@ -8,22 +20,50 @@ import scanpy as sc
 import torch
 from scipy.sparse import issparse
 
-from ..models import AnnotationResult, CellAnnotation
+from ..models import (
+    AlternativeCellType,
+    AnnotationRequest,
+    AnnotationResponse,
+    CellAnnotation,
+    CellTypePredictionRequest,
+    CellTypePredictionResponse,
+)
 from ..services import get_loader
+from ..constants import (
+    CONFIDENCE_MULTIPLIER,
+    MARKER_GENES,
+    MAX_CONFIDENCE,
+    MIN_ALTERNATIVE_PROB,
+    MIN_CELLS_PER_GENE,
+    MIN_GENES_PER_CELL,
+    MIN_VALID_GENES_WARNING,
+    N_TOP_ALTERNATIVES,
+    NORMALIZATION_TARGET_SUM,
+)
 
-logger = logging.getLogger(__name__)
 
 
 def _preprocess_adata(adata: sc.AnnData, n_hvg: int = 2000) -> sc.AnnData:
-    """Preprocess AnnData for scGPT embedding."""
+    """Preprocess AnnData for scGPT embedding.
+
+    Applies standard single-cell preprocessing steps including quality filtering,
+    normalization, log transformation, and highly variable gene selection.
+
+    Args:
+        adata: AnnData object containing raw expression data.
+        n_hvg: Number of highly variable genes to select.
+
+    Returns:
+        Preprocessed AnnData object with HVG subset.
+    """
     adata = adata.copy()
 
     # Basic preprocessing
-    sc.pp.filter_cells(adata, min_genes=200)
-    sc.pp.filter_genes(adata, min_cells=3)
+    sc.pp.filter_cells(adata, min_genes=MIN_GENES_PER_CELL)
+    sc.pp.filter_genes(adata, min_cells=MIN_CELLS_PER_GENE)
 
     # Normalize and log transform
-    sc.pp.normalize_total(adata, target_sum=1e4)
+    sc.pp.normalize_total(adata, target_sum=NORMALIZATION_TARGET_SUM)
     sc.pp.log1p(adata)
 
     # Find highly variable genes
@@ -33,42 +73,48 @@ def _preprocess_adata(adata: sc.AnnData, n_hvg: int = 2000) -> sc.AnnData:
 
 
 def _get_expression_matrix(adata: sc.AnnData) -> np.ndarray:
-    """Extract expression matrix as dense numpy array."""
+    """Extract expression matrix as dense numpy array.
+
+    Args:
+        adata: AnnData object containing expression data.
+
+    Returns:
+        Dense numpy array of shape (n_cells, n_genes).
+    """
     X = adata.X
+    if X is None:
+        raise ValueError("AnnData object has no expression matrix (X is None)")
     if issparse(X):
-        X = X.toarray()
+        X = X.toarray()  # type: ignore[union-attr]
     return np.array(X)
 
 
-async def annotate_cell_types(
-    expression_data: str,
-    reference_dataset: str = "cellxgene",
-    batch_size: int = 64,
-) -> AnnotationResult:
-    """
-    Annotate cell types from single-cell RNA-seq data using scGPT embeddings.
+async def annotate_cell_types(request: AnnotationRequest) -> AnnotationResponse:
+    """Annotate cell types from single-cell RNA-seq data using scGPT embeddings.
 
-    This tool uses the scGPT foundation model to generate cell embeddings
-    and maps them to known cell types. Currently uses a simplified approach
-    based on marker gene expression until reference datasets are integrated.
+    Uses the scGPT foundation model to generate cell embeddings and maps them
+    to known cell types based on marker gene expression patterns.
 
     Args:
-        expression_data: Path to h5ad file containing expression data
-        reference_dataset: Reference dataset for annotation (currently informational)
-        batch_size: Batch size for GPU inference
+        request: AnnotationRequest containing expression data path, reference
+            dataset, and batch size configuration.
 
     Returns:
-        AnnotationResult with predicted cell types and confidence scores
+        AnnotationResponse with predicted cell types and confidence scores.
+
+    Raises:
+        FileNotFoundError: If the expression data file or model checkpoint
+            is not found.
     """
     # Validate input path
-    data_path = Path(expression_data)
+    data_path = Path(request.expression_data)
     if not data_path.exists():
-        raise FileNotFoundError(f"Expression data not found: {expression_data}")
+        raise FileNotFoundError(f"Expression data not found: {request.expression_data}")
 
-    logger.info(f"Loading expression data from {expression_data}")
+    logger.info(f"Loading expression data from {request.expression_data}")
 
     # Load the data
-    adata = sc.read_h5ad(expression_data)
+    adata = sc.read_h5ad(request.expression_data)
     logger.info(f"Loaded {adata.n_obs} cells x {adata.n_vars} genes")
 
     # Store original cell IDs
@@ -94,7 +140,7 @@ async def annotate_cell_types(
         valid_genes = [g for g in gene_names if g in vocab]
         logger.info(f"Found {len(valid_genes)}/{len(gene_names)} genes in scGPT vocabulary")
 
-        if len(valid_genes) < 100:
+        if len(valid_genes) < MIN_VALID_GENES_WARNING:
             logger.warning("Very few genes match vocabulary. Results may be unreliable.")
 
         # Get model for cell embedding
@@ -111,8 +157,8 @@ async def annotate_cell_types(
         annotations = []
         n_cells = adata_processed.n_obs
 
-        for batch_start in range(0, n_cells, batch_size):
-            batch_end = min(batch_start + batch_size, n_cells)
+        for batch_start in range(0, n_cells, request.batch_size):
+            batch_end = min(batch_start + request.batch_size, n_cells)
             batch_expr = expr_matrix[batch_start:batch_end]
 
             # Convert expression to tensor
@@ -126,17 +172,35 @@ async def annotate_cell_types(
 
             cell_embeds_np = cell_embeds.cpu().numpy()
 
+            # Extract expression matrix for this batch
+            X_processed = adata_processed.X
+            if X_processed is None:
+                raise ValueError("Processed AnnData has no expression matrix")
+            batch_expr_raw = X_processed[batch_start:batch_end]  # type: ignore[index]
+            if issparse(batch_expr_raw):
+                batch_expr_raw = batch_expr_raw.toarray()  # type: ignore[union-attr]
+            else:
+                batch_expr_raw = np.array(batch_expr_raw)
+
+            gene_names = adata_processed.var_names.tolist()
+
             for i, (cell_idx, embed) in enumerate(zip(range(batch_start, batch_end), cell_embeds_np)):
-                predicted_type, confidence, alternatives = _predict_cell_type(
-                    embed, adata_processed, cell_idx, valid_genes
+                prediction_request = CellTypePredictionRequest(
+                    embedding=embed.tolist(),
+                    expression=batch_expr_raw[i].tolist(),
+                    gene_names=gene_names,
                 )
+                prediction = _predict_cell_type(prediction_request)
 
                 annotations.append(
                     CellAnnotation(
                         cell_id=cell_ids[cell_idx],
-                        predicted_type=predicted_type,
-                        confidence=confidence,
-                        alternative_types=alternatives,
+                        predicted_type=prediction.predicted_type,
+                        confidence=prediction.confidence,
+                        alternative_types=[
+                            (alt.cell_type, alt.probability)
+                            for alt in prediction.alternatives
+                        ],
                     )
                 )
 
@@ -151,7 +215,7 @@ async def annotate_cell_types(
         adata.write_h5ad(output_path)
         logger.info(f"Saved annotated data to {output_path}")
 
-        return AnnotationResult(
+        return AnnotationResponse(
             total_cells=len(annotations),
             annotations=annotations,
             unique_types=unique_types,
@@ -166,41 +230,25 @@ async def annotate_cell_types(
         raise
 
 
-def _predict_cell_type(
-    embedding: np.ndarray,
-    adata: sc.AnnData,
-    cell_idx: int,
-    valid_genes: list[str],
-) -> tuple[str, float, list[tuple[str, float]]]:
-    """
-    Predict cell type from embedding using marker gene heuristics.
+def _predict_cell_type(request: CellTypePredictionRequest) -> CellTypePredictionResponse:
+    """Predict cell type from embedding using marker gene heuristics.
 
-    This is a simplified approach. In production, use a trained classifier
+    Uses a simplified approach based on marker gene expression scores.
+    In production, this should be replaced with a trained classifier
     or k-NN against a reference dataset.
+
+    Args:
+        request: CellTypePredictionRequest containing the cell embedding,
+            expression values, and gene names.
+
+    Returns:
+        CellTypePredictionResponse with predicted type, confidence, and alternatives.
     """
-    marker_genes = {
-        "T cell": ["CD3D", "CD3E", "CD3G", "CD4", "CD8A", "CD8B"],
-        "B cell": ["CD19", "MS4A1", "CD79A", "CD79B"],
-        "NK cell": ["NKG7", "GNLY", "KLRD1", "NCAM1"],
-        "Monocyte": ["CD14", "LYZ", "FCGR3A", "MS4A7"],
-        "Macrophage": ["CD68", "CD163", "MRC1", "MARCO"],
-        "Dendritic cell": ["CD1C", "FCER1A", "CLEC10A", "CD141"],
-        "Neutrophil": ["FCGR3B", "CSF3R", "S100A8", "S100A9"],
-        "Endothelial": ["PECAM1", "VWF", "CDH5", "CLDN5"],
-        "Fibroblast": ["COL1A1", "COL1A2", "DCN", "LUM"],
-        "Epithelial": ["EPCAM", "KRT18", "KRT19", "CDH1"],
-    }
-
-    expr = adata.X[cell_idx]
-    if issparse(expr):
-        expr = expr.toarray().flatten()
-    else:
-        expr = np.array(expr).flatten()
-
-    gene_to_idx = {g: i for i, g in enumerate(adata.var_names)}
+    expr = np.array(request.expression)
+    gene_to_idx = {g: i for i, g in enumerate(request.gene_names)}
 
     scores = {}
-    for cell_type, markers in marker_genes.items():
+    for cell_type, markers in MARKER_GENES.items():
         marker_expr = []
         for marker in markers:
             if marker in gene_to_idx:
@@ -216,8 +264,16 @@ def _predict_cell_type(
     sorted_types = sorted(probs.items(), key=lambda x: -x[1])
 
     predicted_type = sorted_types[0][0]
-    confidence = min(sorted_types[0][1] * 2, 0.99)
+    confidence = min(sorted_types[0][1] * CONFIDENCE_MULTIPLIER, MAX_CONFIDENCE)
 
-    alternatives = [(t, round(p, 3)) for t, p in sorted_types[1:4] if p > 0.01]
+    alternatives = [
+        AlternativeCellType(cell_type=t, probability=round(p, 3))
+        for t, p in sorted_types[1 : N_TOP_ALTERNATIVES + 1]
+        if p > MIN_ALTERNATIVE_PROB
+    ]
 
-    return predicted_type, round(confidence, 3), alternatives
+    return CellTypePredictionResponse(
+        predicted_type=predicted_type,
+        confidence=round(confidence, 3),
+        alternatives=alternatives,
+    )
