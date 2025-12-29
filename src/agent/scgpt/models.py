@@ -10,7 +10,7 @@ Example:
     64
 """
 
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
@@ -256,3 +256,71 @@ class ScGPTModelConfig(BaseModel):
     dropout: float = Field(default=MODEL_DROPOUT, ge=0.0, le=1.0, description="Dropout rate")
     pad_token: str = Field(default="<pad>", description="Padding token")
     vocab: dict[str, int] = Field(..., description="Gene vocabulary mapping")
+
+
+# =============================================================================
+# Temporal Workflow Models
+# =============================================================================
+
+
+class AnalysisWorkflowRequest(BaseModel):
+    """Request to start an scGPT analysis workflow via Temporal.
+
+    Attributes:
+        expression_data: Path to expression data file (.h5ad).
+        reference_dataset: Reference dataset for cell type annotation.
+    """
+
+    expression_data: str = Field(
+        ...,
+        description="Path to expression data file (.h5ad)",
+    )
+    reference_dataset: str = Field(
+        default="cellxgene",
+        description="Reference dataset for annotation",
+    )
+
+
+class AnalysisWorkflowResult(BaseModel):
+    """Result from a completed scGPT analysis workflow.
+
+    Attributes:
+        annotation: Cell type annotation results.
+        embeddings: Gene embedding extraction results.
+        status: Workflow completion status.
+    """
+
+    annotation: AnnotationResponse
+    embeddings: EmbeddingResponse
+    status: Literal["complete", "partial", "failed"] = Field(
+        default="complete",
+        description="Workflow completion status",
+    )
+
+
+class WorkflowStatus(BaseModel):
+    """Status information for a Temporal workflow.
+
+    Attributes:
+        workflow_id: Unique identifier for the workflow.
+        status: Current workflow status from Temporal.
+        task_queue: Task queue the workflow is running on.
+    """
+
+    workflow_id: str = Field(..., description="Unique workflow identifier")
+    status: str = Field(..., description="Current workflow status")
+    task_queue: str = Field(..., description="Task queue name")
+
+
+class WorkflowResult(BaseModel):
+    """Complete result from a Temporal workflow execution.
+
+    Attributes:
+        workflow_id: Unique identifier for the workflow.
+        status: Final workflow status.
+        result: Workflow output data.
+    """
+
+    workflow_id: str = Field(..., description="Unique workflow identifier")
+    status: str = Field(..., description="Final workflow status")
+    result: AnalysisWorkflowResult = Field(..., description="Workflow output data")

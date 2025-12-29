@@ -23,6 +23,7 @@ from loguru import logger
 from scipy.sparse import issparse
 from sklearn.metrics import silhouette_score
 from sklearn.neighbors import NearestNeighbors
+from temporalio import activity
 
 from ..models import BatchIntegrationRequest, BatchIntegrationResponse
 from ..services import get_loader
@@ -119,6 +120,7 @@ def _get_expression_matrix(adata: sc.AnnData) -> np.ndarray:
     return np.array(X)
 
 
+@activity.defn
 async def integrate_batches(request: BatchIntegrationRequest) -> BatchIntegrationResponse:
     """Integrate multiple scRNA-seq datasets with batch correction using scGPT.
 

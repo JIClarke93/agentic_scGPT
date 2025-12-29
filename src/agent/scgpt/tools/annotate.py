@@ -12,13 +12,14 @@ Example:
     >>> print(f"Found {len(result.unique_types)} cell types")
 """
 
-from loguru import logger
 from pathlib import Path
 
 import numpy as np
 import scanpy as sc
 import torch
+from loguru import logger
 from scipy.sparse import issparse
+from temporalio import activity
 
 from ..models import (
     AlternativeCellType,
@@ -89,6 +90,7 @@ def _get_expression_matrix(adata: sc.AnnData) -> np.ndarray:
     return np.array(X)
 
 
+@activity.defn
 async def annotate_cell_types(request: AnnotationRequest) -> AnnotationResponse:
     """Annotate cell types from single-cell RNA-seq data using scGPT embeddings.
 

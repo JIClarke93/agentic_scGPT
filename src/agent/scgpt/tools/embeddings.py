@@ -15,15 +15,16 @@ Example:
     >>> print(f"Got {len(result.embeddings)} embeddings of dim {result.embedding_dim}")
 """
 
-from loguru import logger
-
 import numpy as np
+from loguru import logger
 from sklearn.metrics.pairwise import cosine_similarity
+from temporalio import activity
 
 from ..models import EmbeddingRequest, EmbeddingResponse, GeneEmbedding
 from ..services import get_loader
 
 
+@activity.defn
 async def get_gene_embeddings(request: EmbeddingRequest) -> EmbeddingResponse:
     """Extract gene embeddings from scGPT for downstream analysis.
 
